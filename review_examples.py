@@ -1,12 +1,13 @@
-"""复测工单样例。直接运行只核对既有签报及其可用证据。"""
+"""复测工单样例。直接运行核对既有签报、可用证据与断源复核。"""
 import json
 from contextlib import closing
 
-from analysis.request import publish
+from analysis.request import publish, publish_review
 from bench.revisions import record_revision
-from evidence.intake import receive
-from evidence.issue import issue
+from evidence.intake import receive, receive_supplement
+from evidence.issue import issue, issue_supplement
 from lab import open_center, open_source
+from report.history import read_review
 from trial.catalog import define_trial
 
 
@@ -68,6 +69,20 @@ def seed_case(source, center, name):
     return tuple(received)
 
 
+def run_orders(center, signed, orders, supplement_ids):
+    reviews = []
+    for order, ids in zip(orders, supplement_ids, strict=True):
+        review = publish_review(center, signed.snapshot.report_id, order["clauses"], ids)
+        if review["intervals"] != order["intervals"]:
+            raise AssertionError(review)
+        again = read_review(center, review["review_id"])
+        if again != review:
+            raise AssertionError(again)
+        reviews.append({"review_id": review["review_id"], "receipt_id": review["receipt_id"],
+                        "intervals": review["intervals"]})
+    return reviews
+
+
 def main():
     bodies = {}
     for name, case in CASES.items():
@@ -75,12 +90,25 @@ def main():
             with closing(open_source(":memory:")) as source:
                 first, second = seed_case(source, center, name)
                 bodies[name] = first.envelope.body
-            decision = publish(center, name, first.received_id, second.received_id).snapshot.decision
-            platforms = [[o.boundary.position, str(o.low_shift), str(o.high_shift)] for o in decision.optima]
+                signed = publish(center, name, first.received_id, second.received_id)
+                supplements = []
+                for order in case["orders"]:
+                    ids = []
+                    for parent in signed.snapshot.parents:
+                        role_clauses = [clause for clause in order["clauses"]
+                                        if clause[0] == parent.origin.role]
+                        text = issue_supplement(source, parent.origin.issue_id, role_clauses)
+                        ids.append(receive_supplement(center, parent.received_id, text))
+                    supplements.append(ids)
+                decision = signed.snapshot.decision
+                platforms = [[o.boundary.position, str(o.low_shift), str(o.high_shift)]
+                             for o in decision.optima]
+            reviews = run_orders(center, signed, case["orders"], supplements)
             result = {"case": name, "minimum": str(decision.minimum), "platforms": platforms}
             if result != {"case": name, "minimum": case["loss"], "platforms": case["platforms"]}:
                 raise AssertionError(result)
             print(json.dumps(result, sort_keys=True))
+            print(json.dumps({"case": name, "reviews": reviews}, ensure_ascii=False, sort_keys=True))
     matched = bodies["outlier-after"] == bodies["outlier-before"]
     if not matched:
         raise AssertionError("legacy bodies differ")

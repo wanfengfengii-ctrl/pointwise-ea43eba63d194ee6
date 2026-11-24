@@ -49,6 +49,21 @@ def initialize_reports(connection):
             report_id INTEGER NOT NULL UNIQUE REFERENCES signed_reports(report_id)
         )
     ''')
+    connection.execute('''
+        CREATE TABLE IF NOT EXISTS review_reports (
+            review_id INTEGER PRIMARY KEY,
+            old_report_id INTEGER NOT NULL REFERENCES signed_reports(report_id),
+            clauses TEXT NOT NULL,
+            basis TEXT NOT NULL,
+            intervals TEXT NOT NULL
+        )
+    ''')
+    connection.execute('''
+        CREATE TABLE IF NOT EXISTS review_receipts (
+            receipt_id INTEGER PRIMARY KEY,
+            review_id INTEGER NOT NULL UNIQUE REFERENCES review_reports(review_id)
+        )
+    ''')
 
 
 def publication_transaction(connection):
@@ -138,3 +153,35 @@ def fetch_receipt(connection, report_id):
     if row is None:
         raise LookupError(f'no success receipt for report {report_id}')
     return row[0]
+
+
+def insert_review(connection, old_report_id, clauses, basis, intervals):
+    _require_publication_transaction(connection)
+    cursor = connection.execute('''
+        INSERT INTO review_reports (old_report_id, clauses, basis, intervals) VALUES (?, ?, ?, ?)
+    ''', (old_report_id, canonical_json(clauses), canonical_json(basis), canonical_json(intervals)))
+    review_id = cursor.lastrowid
+    cursor = connection.execute('INSERT INTO review_receipts (review_id) VALUES (?)', (review_id,))
+    return review_id, cursor.lastrowid
+
+
+def fetch_review(connection, review_id):
+    require_record_id(review_id, 'review ID')
+    row = connection.execute('''
+        SELECT old_report_id, clauses, basis, intervals FROM review_reports WHERE review_id = ?
+    ''', (review_id,)).fetchone()
+    if row is None:
+        raise LookupError(f'unknown review {review_id}')
+    receipt = connection.execute(
+        'SELECT receipt_id FROM review_receipts WHERE review_id = ?', (review_id,)
+    ).fetchone()
+    if receipt is None:
+        raise LookupError(f'no success receipt for review {review_id}')
+    return {
+        'review_id': review_id,
+        'receipt_id': receipt[0],
+        'old_report_id': row[0],
+        'clauses': json.loads(row[1]),
+        'basis': json.loads(row[2]),
+        'intervals': json.loads(row[3]),
+    }
